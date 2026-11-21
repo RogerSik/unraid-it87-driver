@@ -1,18 +1,24 @@
 <?xml version='1.0' standalone='yes'?>
 <!DOCTYPE PLUGIN [
   <!ENTITY name      "it87-driver">
-  <!ENTITY author    "ich777">
-  <!ENTITY version   "2024.07.10">
-  <!ENTITY gitURL    "https://github.com/&author;/unraid-&name;/raw/master">
-  <!ENTITY pluginURL "&gitURL;/&name;.plg">
+  <!ENTITY author    "RogerSik">
+  <!ENTITY version   "@VERSION@">
+  <!ENTITY repoURL   "https://github.com/&author;/unraid-&name;">
+  <!ENTITY pluginURL "&repoURL;/releases/latest/download/&name;.plg">
   <!ENTITY plugin    "/boot/config/plugins/&name;">
   <!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
   <!ENTITY packages  "/boot/config/plugins/&name;/packages">
 ]>
 
-<PLUGIN  name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;" min="6.10.3">
+<PLUGIN  name="&name;" author="&author;" version="&version;" pluginURL="&pluginURL;" min="7.0.0" support="&repoURL;/issues">
 
 <CHANGES>
+
+###2026.11.21
+- Continuation of ich777/unraid-it87-driver (ich777 stopped working on unRAID plugins)
+- Versioned installs from GitHub releases, kernel modules built by GitHub Actions for new unRAID releases (ich777's releases as fallback)
+- No Plugin Update Helper anymore: the module for a new kernel is downloaded on boot
+- A failed download no longer deletes the plugin directory
 
 ###2024.07.10
 - Add Plugin Update Helper to ensure driver package is downloaded ahead of time when unRAID is updated
@@ -29,8 +35,8 @@
 <INLINE>
 **ITE IT87 Driver**
 
-This package contains a modified version from the ITE IT87 Drivers to get compatibility with chips like IT8686E,.. and installs them for using it with the Dynamix System Temperature Plugin.  
-  
+This package contains a modified version from the ITE IT87 Drivers to get compatibility with chips like IT8686E,.. and installs them for using it with the Dynamix System Temperature Plugin.
+
 Source: https://github.com/frankcrawford/it87
 </INLINE>
 </FILE>
@@ -39,28 +45,37 @@ Source: https://github.com/frankcrawford/it87
 <INLINE>
 
 download() {
-#Download IT87 Drivers
 if wget -q -nc --show-progress --progress=bar:force:noscroll -O "&packages;/${KERNEL_V%%-*}/${LAT_PACKAGE}" "${DL_URL}/${LAT_PACKAGE}" ; then
   wget -q -nc --show-progress --progress=bar:force:noscroll -O "&packages;/${KERNEL_V%%-*}/${LAT_PACKAGE}.md5" "${DL_URL}/${LAT_PACKAGE}.md5"
   if [ "$(md5sum &packages;/${KERNEL_V%%-*}/${LAT_PACKAGE} | awk '{print $1}')" != "$(cat &packages;/${KERNEL_V%%-*}/${LAT_PACKAGE}.md5 | awk '{print $1}')" ]; then
     echo
-    echo "---CHECKSUM ERROR!---"
-    rm -rf &plugin; &emhttp;
+    echo "---------------------------CHECKSUM ERROR!-------------------------------"
+    rm -f &packages;/${KERNEL_V%%-*}/${LAT_PACKAGE}*
     exit 1
   fi
   echo
-  echo "-------------------Sucessfully downloaded IT87 Drivers-------------------"
+  echo "-------------------Successfully downloaded IT87 Drivers------------------"
 else
   echo
   echo "-----------------------Can't download IT87 Drivers-----------------------"
-  rm -rf &plugin; &emhttp;
+  rm -f &packages;/${KERNEL_V%%-*}/${LAT_PACKAGE}*
   exit 1
 fi
 }
 
 check() {
 if ! ls -1 &packages;/${KERNEL_V%%-*}/ | grep -q "${PACKAGE}" ; then
-  LAT_PACKAGE="$(wget -qO- https://api.github.com/repos/ich777/unraid-it87-driver/releases/tags/${KERNEL_V} | jq -r '.assets[].name' | grep "${PACKAGE}" | grep -E -v '\.md5$' | sort -V | tail -1)"
+  # own builds first, ich777's releases as fallback for kernels built before the fork
+  for REPO in &author;/unraid-&name; ich777/unraid-it87-driver; do
+    LAT_PACKAGE="$(wget -qO- https://api.github.com/repos/${REPO}/releases/tags/${KERNEL_V} | jq -r '.assets[].name' 2>/dev/null | grep "${PACKAGE}" | grep -E -v '\.md5$' | sort -V | tail -1)"
+    DL_URL="https://github.com/${REPO}/releases/download/${KERNEL_V}"
+    [ -n "${LAT_PACKAGE}" ] &amp;&amp; break
+  done
+  if [ -z "${LAT_PACKAGE}" ]; then
+    echo
+    echo "------------No IT87 Drivers package found for Kernel ${KERNEL_V}-----------"
+    exit 1
+  fi
   echo
   echo "-----------------------Downloading IT87 Drivers!-------------------------"
   echo "---------This could take some time, please don't close this window!----------"
@@ -72,7 +87,6 @@ fi
 }
 
 install() {
-#Install IT87 Drivers
 /sbin/modprobe -rf it87 2>/dev/null
 /sbin/installpkg "&packages;/${KERNEL_V%%-*}/${PACKAGE}*.txz"
 depmod -a
@@ -85,16 +99,18 @@ activate() {
 # Define Variables
 KERNEL_V="$(uname -r)"
 PACKAGE="it87"
-DL_URL="https://github.com/ich777/unraid-it87-driver/releases/download/$KERNEL_V"
 
 if [ ! -d "&packages;/${KERNEL_V%%-*}" ]; then
   mkdir -p "&packages;/${KERNEL_V%%-*}"
 fi
 
-#Check for old packages
+# Check for old packages
 rm -rf $(ls -d &packages;/* | grep -v "${KERNEL_V%%-*}")
 
-#Check if IT87 Drivers are already downloaded
+# Leftover from ich777's version, the Plugin Update Helper is not used anymore
+rm -f &plugin;/plugin_update_helper
+
+# Check if IT87 Drivers are already downloaded
 check
 
 if ! modinfo it87 | grep -q "mmio" >/dev/null 2>&amp;1 ; then
@@ -104,48 +120,6 @@ fi
 if ! lsmod | grep "it87" >/dev/null 2>&amp;1 ; then
   activate
 fi
-
-
-#Check if Plugin Update Helper is downloaded and up-to-date
-if [ ! -f &plugin;/plugin_update_helper ]; then
-  wget -q -T 5 -O &plugin;/plugin_update_helper "https://raw.githubusercontent.com/ich777/unraid-plugin_update_helper/master/plugin_update_helper"
-else
-  CUR_V="$(grep -E "Plugin-Update-Helper version:" &plugin;/plugin_update_helper | awk '{print $4}')"
-  if [ ! -s /tmp/update-helper ]; then
-    echo "$(wget -T5 -qO- https://raw.githubusercontent.com/ich777/unraid-plugin_update_helper/master/plugin_update_helper | grep -E "Plugin-Update-Helper version:" | awk '{print $4}')" > /tmp/update-helper
-    AVAIL_V="$(cat /tmp/update-helper)"
-  else
-    AVAIL_V="$(cat /tmp/update-helper)"
-  fi
-  if [ ! -z "$AVAIL_V" ]; then
-    COMPARE="$(sort -V &lt;(echo -e "${AVAIL_V}\n$CUR_V") | tail -1)"
-    if [ "$CUR_V" != "$COMPARE" ]; then
-      wget -q -T 5 -O &plugin;/plugin_update_helper "https://raw.githubusercontent.com/ich777/unraid-plugin_update_helper/master/plugin_update_helper"
-    fi
-  fi
-fi
-
-#Check if Plugin Update Helper is installed and up to date
-if [ ! -f /usr/bin/plugin_update_helper ]; then
-  cp &plugin;/plugin_update_helper /usr/bin/plugin_update_helper
-  chmod +x /usr/bin/plugin_update_helper
-else
-  PLUGIN_V="$(grep -E "Plugin-Update-Helper version:" &plugin;/plugin_update_helper | awk '{print $4}')"
-  INST_V="$(grep -E "Plugin-Update-Helper version:" /usr/bin/plugin_update_helper | awk '{print $4}')"
-  COMPARE="$(sort -V &lt;(echo -e "${PLUGIN_V}\n$INST_V") | tail -1)"
-  if [ "$INST_V" != "$COMPARE" ]; then
-    kill $(ps aux | grep -E "inotifywait -q /boot/changes.txt -e move_self,delete_self" | grep -v "grep -E inotifywait" | awk '{print $2}') 2>/dev/null
-    sleep 1
-    cp &plugin;/plugin_update_helper /usr/bin/plugin_update_helper
-    chmod +x /usr/bin/plugin_update_helper
-  fi
-fi
-
-#Start Plugin Update Helper
-if [ -z "$(ps aux | grep -E "inotifywait -q /boot/changes.txt -e move_self,delete_self" | grep -v "grep -E inotifywait" | awk '{print $2}')" ]; then
-  echo "/usr/bin/plugin_update_helper" | at now &gt; /dev/null 2&gt;&amp;1
-fi
-
 
 echo
 echo "----------------Installation of IT87 Drivers successful------------------"
